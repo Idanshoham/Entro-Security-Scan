@@ -53,7 +53,7 @@ func TestPaginationHandling(t *testing.T) {
 	pageCount := 0
 
 	for {
-		_, resp, err := client.Repositories.ListCommits(ctx, "Idanshoham", "Currency-Converter-Tool-Java", opt)
+		_, resp, err := client.Repositories.ListCommits(ctx, "someuser", "somerepo", opt) // please replace parameters here with real parameters in order for the test to pass
 		if err != nil {
 			t.Fatalf("Error fetching commits: %v", err)
 		}
@@ -82,4 +82,49 @@ func TestLastCommitStorage(t *testing.T) {
 
 	// Cleanup
 	_ = os.Remove("last_commit.txt")
+}
+
+func TestScanAPINoQueryParams(t *testing.T) {
+	req, err := http.NewRequest("GET", "/scan", nil) // No query params
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(handleScan)
+	handler.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusBadRequest {
+		t.Errorf("Handler returned wrong status code: got %v, want %v", status, http.StatusBadRequest)
+	}
+}
+
+func TestScanAPINoAuthenticatedUser(t *testing.T) {
+	req, err := http.NewRequest("GET", "/scan?owner=someuser&repo=somerepo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(handleScan)
+	handler.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusInternalServerError {
+		t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusInternalServerError)
+	}
+}
+
+func TestScanAPIAllPass(t *testing.T) {
+	req, err := http.NewRequest("GET", "/scan?owner=someuser&repo=somerepo", nil) // please replace parameters here with real parameters in order for the test to pass
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(handleScan)
+	handler.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		t.Errorf("Handler returned wrong status code: got %v want %v", status, http.StatusOK)
+	}
 }

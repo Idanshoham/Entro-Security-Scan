@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
@@ -16,67 +19,106 @@ import (
 var awsKeyPattern = regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`)
 
 func main() {
+	http.HandleFunc("/scan", handleScan)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Server running on port %s...", port)
+	http.ListenAndServe(":"+port, nil)
+}
+
+func handleScan(w http.ResponseWriter, r *http.Request) {
+	owner := r.URL.Query().Get("owner")
+	repo := r.URL.Query().Get("repo")
+	if owner == "" || repo == "" {
+		http.Error(w, "Missing 'owner' or 'repo' query parameters", http.StatusBadRequest)
+		return
+	}
+
 	githubToken := os.Getenv("GITHUB_TOKEN")
 	if githubToken == "" {
-		log.Fatal("Missing GITHUB_TOKEN environment variable")
+		http.Error(w, "Missing GITHUB_TOKEN environment variable", http.StatusInternalServerError)
+		return
 	}
 
-	owner, repo := "Idanshoham", "Currency-Converter-Tool-Java" // Replace with actual values
 	ctx := context.Background()
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: githubToken})
-	client := github.NewClient(oauth2.NewClient(ctx, ts))
+	client := newGitHubClient(ctx, githubToken)
 
-	opt := &github.CommitsListOptions{
-		ListOptions: github.ListOptions{PerPage: 100},
+	branches, _, err := client.Repositories.ListBranches(ctx, owner, repo, nil)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error fetching branches: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	lastCommit := getLastCommit()
-	skipCommits := lastCommit != ""
+	results := []map[string]string{}
 
-	for {
-		commits, resp, err := fetchCommitsWithRetry(client, ctx, owner, repo, opt)
-		if err != nil {
-			log.Fatalf("Error fetching commits: %v", err)
+	for _, branch := range branches {
+		branchName := branch.GetName()
+		log.Printf("Scanning branch: %s\n", branchName)
+
+		opt := &github.CommitsListOptions{
+			SHA:         branchName,
+			ListOptions: github.ListOptions{PerPage: 100},
 		}
 
-		if len(commits) == 0 {
-			break
-		}
-
-		for _, commit := range commits {
-			sha := commit.GetSHA()
-
-			if skipCommits {
-				if sha == lastCommit {
-					skipCommits = false
-				}
-				continue
-			}
-
-			fmt.Printf("Checking commit: %s\n", sha)
-
-			commitData, err := fetchCommitWithRetry(client, ctx, owner, repo, sha)
+		for {
+			commits, resp, err := fetchCommitsWithRetry(client, ctx, owner, repo, opt)
 			if err != nil {
-				log.Printf("Error fetching commit details for %s: %v\n", sha, err)
-				continue
+				http.Error(w, fmt.Sprintf("Error fetching commits: %v", err), http.StatusInternalServerError)
+				return
 			}
 
-			for _, file := range commitData.Files {
-				if awsKeyPattern.MatchString(file.GetPatch()) {
-					fmt.Printf("Potential AWS Secret Found in commit %s by %s\n", sha, commitData.GetCommit().GetCommitter().GetName())
-					fmt.Printf("File: %s\n", file.GetFilename())
-					fmt.Printf("Patch: %s\n", strings.TrimSpace(file.GetPatch()))
+			if len(commits) == 0 {
+				break
+			}
+
+			for _, commit := range commits {
+				sha := commit.GetSHA()
+				log.Printf("Checking commit: %s in branch: %s\n", sha, branchName)
+
+				commitData, err := fetchCommitWithRetry(client, ctx, owner, repo, sha)
+				if err != nil {
+					log.Printf("Error fetching commit details for %s: %v\n", sha, err)
+					continue
+				}
+
+				for _, file := range commitData.Files {
+					if awsKeyPattern.MatchString(file.GetPatch()) {
+						log.Printf("Potential AWS Secret Found in commit %s\n", sha)
+						result := map[string]string{
+							"commit": sha,
+							"branch": branchName,
+							"file":   file.GetFilename(),
+							"patch":  strings.TrimSpace(file.GetPatch()),
+						}
+						results = append(results, result)
+					}
 				}
 			}
 
-			saveLastCommit(sha)
+			if resp.NextPage == 0 {
+				break
+			}
+			opt.Page = resp.NextPage
 		}
-
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.Page = resp.NextPage
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
+}
+
+// Function to create a GitHub client with TLS verification disabled
+func newGitHubClient(ctx context.Context, token string) *github.Client {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Ignore SSL errors
+	}
+
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	oauthClient := oauth2.NewClient(ctx, ts)
+	oauthClient.Transport = tr
+
+	return github.NewClient(oauthClient)
 }
 
 func fetchCommitsWithRetry(client *github.Client, ctx context.Context, owner, repo string, opt *github.CommitsListOptions) ([]*github.RepositoryCommit, *github.Response, error) {
