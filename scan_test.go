@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/google/go-github/v53/github"
@@ -68,4 +69,17 @@ func TestPaginationHandling(t *testing.T) {
 	if pageCount < 2 {
 		t.Errorf("Expected pagination to fetch multiple pages, got %d pages", pageCount)
 	}
+}
+
+func TestLastCommitStorage(t *testing.T) {
+	sha := "testcommit1234"
+	saveLastCommit(sha)
+	savedSha := getLastCommit()
+
+	if savedSha != sha {
+		t.Errorf("Expected %s, got %s", sha, savedSha)
+	}
+
+	// Cleanup
+	_ = os.Remove("last_commit.txt")
 }

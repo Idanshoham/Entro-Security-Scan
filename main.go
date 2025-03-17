@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v53/github"
 	"golang.org/x/oauth2"
@@ -15,28 +16,25 @@ import (
 var awsKeyPattern = regexp.MustCompile(`(?i)AKIA[0-9A-Z]{16}`)
 
 func main() {
-	// Load GitHub token from env variable
 	githubToken := os.Getenv("GITHUB_TOKEN")
-
 	if githubToken == "" {
 		log.Fatal("Missing GITHUB_TOKEN environment variable")
 	}
 
-	// Define repo owner and name
 	owner, repo := "Idanshoham", "Currency-Converter-Tool-Java" // Replace with actual values
-
-	// Authenticate with GitHub API
 	ctx := context.Background()
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: githubToken})
 	client := github.NewClient(oauth2.NewClient(ctx, ts))
 
-	// Fetch commits with pagination
 	opt := &github.CommitsListOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
+	lastCommit := getLastCommit()
+	skipCommits := lastCommit != ""
+
 	for {
-		commits, resp, err := client.Repositories.ListCommits(ctx, owner, repo, opt)
+		commits, resp, err := fetchCommitsWithRetry(client, ctx, owner, repo, opt)
 		if err != nil {
 			log.Fatalf("Error fetching commits: %v", err)
 		}
@@ -47,10 +45,17 @@ func main() {
 
 		for _, commit := range commits {
 			sha := commit.GetSHA()
+
+			if skipCommits {
+				if sha == lastCommit {
+					skipCommits = false
+				}
+				continue
+			}
+
 			fmt.Printf("Checking commit: %s\n", sha)
 
-			// Fetch commit details
-			commitData, _, err := client.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+			commitData, err := fetchCommitWithRetry(client, ctx, owner, repo, sha)
 			if err != nil {
 				log.Printf("Error fetching commit details for %s: %v\n", sha, err)
 				continue
@@ -63,11 +68,71 @@ func main() {
 					fmt.Printf("Patch: %s\n", strings.TrimSpace(file.GetPatch()))
 				}
 			}
+
+			saveLastCommit(sha)
 		}
 
 		if resp.NextPage == 0 {
-			break // No more pages
+			break
 		}
-		opt.Page = resp.NextPage // Move to the next page
+		opt.Page = resp.NextPage
 	}
+}
+
+func fetchCommitsWithRetry(client *github.Client, ctx context.Context, owner, repo string, opt *github.CommitsListOptions) ([]*github.RepositoryCommit, *github.Response, error) {
+	for {
+		commits, resp, err := client.Repositories.ListCommits(ctx, owner, repo, opt)
+		if err == nil {
+			return commits, resp, nil
+		}
+
+		if resp != nil && resp.StatusCode == 403 {
+			handleRateLimit(resp)
+			continue
+		}
+
+		return nil, nil, err
+	}
+}
+
+func saveLastCommit(sha string) {
+	err := os.WriteFile("last_commit.txt", []byte(sha), 0644)
+	if err != nil {
+		log.Printf("Error saving last commit: %v", err)
+	}
+}
+
+func getLastCommit() string {
+	data, err := os.ReadFile("last_commit.txt")
+	if err != nil {
+		return "" // No previous scan found, start from the beginning
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func fetchCommitWithRetry(client *github.Client, ctx context.Context, owner, repo, sha string) (*github.RepositoryCommit, error) {
+	for {
+		commit, resp, err := client.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+		if err == nil {
+			return commit, nil
+		}
+
+		if resp != nil && resp.StatusCode == 403 {
+			handleRateLimit(resp)
+			continue
+		}
+
+		return nil, err
+	}
+}
+
+func handleRateLimit(resp *github.Response) {
+	resetTime := time.Now().Add(60 * time.Second) // Default to 60 seconds if unknown
+
+	if resp.Rate.Limit > 0 {
+		resetTime = resp.Rate.Reset.Time
+	}
+
+	log.Printf("Rate limit exceeded. Waiting until %v...\n", resetTime)
+	time.Sleep(time.Until(resetTime))
 }
