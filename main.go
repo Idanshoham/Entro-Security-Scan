@@ -30,29 +30,44 @@ func main() {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: githubToken})
 	client := github.NewClient(oauth2.NewClient(ctx, ts))
 
-	// Fetch commits
-	commits, _, err := client.Repositories.ListCommits(ctx, owner, repo, nil)
-	if err != nil {
-		log.Fatalf("Error fetching commits: %v", err)
+	// Fetch commits with pagination
+	opt := &github.CommitsListOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
 	}
 
-	for _, commit := range commits {
-		sha := commit.GetSHA()
-		fmt.Printf("Checking commit: %s\n", sha)
-
-		// Fetch commit details
-		commitData, _, err := client.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+	for {
+		commits, resp, err := client.Repositories.ListCommits(ctx, owner, repo, opt)
 		if err != nil {
-			log.Printf("Error fetching commit details for %s: %v\n", sha, err)
-			continue
+			log.Fatalf("Error fetching commits: %v", err)
 		}
 
-		for _, file := range commitData.Files {
-			if awsKeyPattern.MatchString(file.GetPatch()) {
-				fmt.Printf("Potential AWS Secret Found in commit %s by %s\n", sha, commitData.GetCommit().GetCommitter().GetName())
-				fmt.Printf("File: %s\n", file.GetFilename())
-				fmt.Printf("Patch: %s\n", strings.TrimSpace(file.GetPatch()))
+		if len(commits) == 0 {
+			break
+		}
+
+		for _, commit := range commits {
+			sha := commit.GetSHA()
+			fmt.Printf("Checking commit: %s\n", sha)
+
+			// Fetch commit details
+			commitData, _, err := client.Repositories.GetCommit(ctx, owner, repo, sha, nil)
+			if err != nil {
+				log.Printf("Error fetching commit details for %s: %v\n", sha, err)
+				continue
+			}
+
+			for _, file := range commitData.Files {
+				if awsKeyPattern.MatchString(file.GetPatch()) {
+					fmt.Printf("Potential AWS Secret Found in commit %s by %s\n", sha, commitData.GetCommit().GetCommitter().GetName())
+					fmt.Printf("File: %s\n", file.GetFilename())
+					fmt.Printf("Patch: %s\n", strings.TrimSpace(file.GetPatch()))
+				}
 			}
 		}
+
+		if resp.NextPage == 0 {
+			break // No more pages
+		}
+		opt.Page = resp.NextPage // Move to the next page
 	}
 }
